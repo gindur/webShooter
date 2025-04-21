@@ -1,21 +1,90 @@
 # Web Shooter Game
 
-A web-based top-down shooting game with smooth animations built with React.
+A browser-based shooting game built with React and styled-components.
 
 ## Features
 
-- Interactive ball controlled by WASD keys
-- Shoot projectiles by clicking
-- Auto-shooting toggle
-- Round-based gameplay progression
-- Zombies that follow the player
-- Dynamic difficulty scaling
-- Game state management (pregame, playing, game over)
-- Score tracking
-- In-game currency and shop system
-- Character upgrades
-- Collision detection
-- Smooth animations
+- Player-controlled ball with WASD movement
+- Mouse-aimed shooting mechanics
+- Enemy zombies that chase the player
+- Ranged minions that shoot projectiles
+- Round-based progression system
+- Shop for upgrading player abilities
+- Score and coin collection
+
+## How to Play
+
+- Use WASD keys to move your ball
+- Click to shoot in the direction of your mouse
+- Avoid zombies and enemy projectiles
+- Collect coins by defeating enemies
+- Complete rounds by reaching the target score
+- Use the shop to upgrade your abilities
+
+## Development Roadmap
+
+### Phase 1: Core Game Mechanics (Current)
+- ✅ Basic player movement and shooting
+- ✅ Enemy spawning and AI
+- ✅ Collision detection
+- ✅ Round progression system
+- ✅ Basic shop functionality
+
+### Phase 2: Item Drops and Power-ups
+- [ ] Implement item drops from defeated enemies
+- [ ] Add temporary power-ups:
+  - [ ] Rapid fire (increased fire rate)
+  - [ ] Speed boost (increased movement speed)
+  - [ ] Shield (temporary invincibility)
+  - [ ] Multi-shot (shoot multiple projectiles)
+  - [ ] Homing projectiles
+- [ ] Visual effects for active power-ups
+- [ ] Power-up duration indicators
+
+### Phase 3: Player Stats System
+- [ ] Add player stats:
+  - [ ] Health (survivability)
+  - [ ] Mana (for special abilities)
+  - [ ] Speed (movement speed)
+  - [ ] Dexterity (reload speed)
+- [ ] UI for displaying current stats
+- [ ] Stat progression system
+- [ ] Stat-based gameplay mechanics
+
+### Phase 4: Enhanced Shop System
+- [ ] Expand shop with new categories:
+  - [ ] Weapons (different projectile types)
+  - [ ] Stat increases (permanent upgrades)
+  - [ ] Special items (passive effects)
+- [ ] Weapon variety:
+  - [ ] Shotgun (spread shot)
+  - [ ] Laser (piercing)
+  - [ ] Explosive (area damage)
+- [ ] Passive items:
+  - [ ] Auto-collect coins
+  - [ ] Health regeneration
+  - [ ] Projectile penetration
+  - [ ] Enemy slow effect
+
+### Phase 5: Advanced Features
+- [ ] Boss enemies at round milestones
+- [ ] Special abilities tied to mana
+- [ ] Achievement system
+- [ ] High score tracking
+- [ ] Different game modes
+
+## Installation
+
+1. Clone the repository
+2. Install dependencies with `npm install`
+3. Start the development server with `npm start`
+4. Open [http://localhost:3000](http://localhost:3000) to view it in your browser
+
+## Technologies Used
+
+- React
+- styled-components
+- JavaScript (ES6+)
 
 ## Getting Started
 
@@ -24,98 +93,3 @@ A web-based top-down shooting game with smooth animations built with React.
    ```bash
    npm install
    ```
-3. Start the development server:
-   ```bash
-   npm start
-   ```
-
-## Game Controls
-
-- **W, A, S, D**: Move the ball
-- **Click**: Shoot a projectile
-- **Click and hold**: Toggle auto-shooting
-- **P**: Open/close the shop
-- **Space**: Continue to next round when a round is complete
-
-## Round System
-
-The game is now round-based with increasing difficulty:
-
-- **Round 1**: Target score of 100 points (10 zombie kills)
-- **Round 2**: Target score of 150 points (15 zombie kills)
-- **Round 3**: Target score of 200 points (20 zombie kills)
-- Each subsequent round increases the target by 50 points
-
-A progress bar shows how close you are to completing the current round. Once you reach the target score, a round completion screen appears, and you can press Space to continue to the next round.
-
-## Shop System
-
-Kill zombies to earn coins, then spend them on upgrades in the shop:
-
-- **Speed Boost (50 coins)**: Move 30% faster
-- **Rapid Fire (50 coins)**: Shoot 40% faster
-- **Bullet Velocity (50 coins)**: Projectiles move 25% faster
-
-Open the shop by pressing **P** during gameplay.
-
-## Difficulty Scaling
-
-The game features a dynamic difficulty system:
-
-- Zombies start at base speed (100%)
-- Speed increases gradually as your score increases
-- Every 100 points increases zombie speed
-- At 1000 points, zombies reach maximum speed (300% of base)
-- Speed remains at maximum from 1000 to 10,000 points
-- The current difficulty level is displayed during gameplay
-
-## Testing
-
-This project has a comprehensive testing suite to ensure core functionality remains intact as development progresses.
-
-### Testing Structure
-
-- **Component Tests**: Tests for React components and their behavior
-- **Utility Tests**: Tests for standalone game logic functions
-
-### Running Tests
-
-To run all tests:
-```
-npm test
-```
-
-To run tests without watch mode:
-```
-npm test -- --watchAll=false
-```
-
-Or use the provided test script:
-```
-./scripts/runTests.sh
-```
-
-### Test Coverage
-
-- Game state transitions
-- Player movement
-- Projectile creation and movement
-- Round system
-- Shop functionality
-- Difficulty scaling
-- Collision detection
-- Math utilities
-- Random position generation
-
-## Project Structure
-
-- `src/components/`: React components
-- `src/utils/`: Utility functions and game logic
-- `src/tests/`: Test files
-
-## Development Guidelines
-
-1. Always run tests before making significant changes
-2. Add tests for new features
-3. Keep game logic separated from rendering logic when possible
-4. Use utility functions for reusable calculations 
