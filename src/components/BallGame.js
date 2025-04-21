@@ -77,6 +77,51 @@ const Zombie = styled.div.attrs(props => ({
   z-index: 1;
 `;
 
+const RangedMinion = styled.div.attrs(props => ({
+  style: {
+    left: `${props.$x}px`,
+    top: `${props.$y}px`,
+  },
+  'data-testid': 'ranged-minion'
+}))`
+  width: 25px;
+  height: 25px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #9b59b6, #8e44ad);
+  position: absolute;
+  box-shadow: 0 0 15px #9b59b6;
+  animation: ${pulse} 2s ease-in-out infinite;
+  z-index: 1;
+  
+  &::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: white;
+    transform: translate(-50%, -50%);
+  }
+`;
+
+const EnemyProjectile = styled.div.attrs(props => ({
+  style: {
+    left: `${props.$x}px`,
+    top: `${props.$y}px`,
+  },
+  'data-testid': 'enemy-projectile'
+}))`
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, #fff 0%, #9b59b6 100%);
+  position: absolute;
+  box-shadow: 0 0 10px #fff, 0 0 20px #9b59b6;
+  z-index: 1;
+`;
+
 const Container = styled.div`
   position: fixed;
   top: 0;
@@ -277,6 +322,39 @@ const RoundContinueButton = styled.button`
   }
 `;
 
+const DebugPanel = styled.div`
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 100;
+  background-color: rgba(0, 0, 0, 0.7);
+  padding: 10px;
+  border-radius: 10px;
+  color: white;
+`;
+
+const DebugButton = styled.button`
+  padding: 8px 16px;
+  font-size: 14px;
+  background: linear-gradient(145deg, #3498db, #2980b9);
+  border: none;
+  border-radius: 5px;
+  color: white;
+  cursor: pointer;
+  transition: transform 0.2s;
+  
+  &:hover {
+    transform: translateY(-2px);
+  }
+  
+  &:active {
+    transform: translateY(1px);
+  }
+`;
+
 const BallGame = () => {
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [keys, setKeys] = useState({
@@ -288,6 +366,8 @@ const BallGame = () => {
   const [arenaSize, setArenaSize] = useState({ width: 0, height: 0 });
   const [projectiles, setProjectiles] = useState([]);
   const [zombies, setZombies] = useState([]);
+  const [rangedMinions, setRangedMinions] = useState([]);
+  const [enemyProjectiles, setEnemyProjectiles] = useState([]);
   const [isAutoShooting, setIsAutoShooting] = useState(false);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [score, setScore] = useState(0);
@@ -297,6 +377,8 @@ const BallGame = () => {
   const [shopOpen, setShopOpen] = useState(false);
   const [round, setRound] = useState(1);
   const [roundComplete, setRoundComplete] = useState(false);
+  const [roundShopOpen, setRoundShopOpen] = useState(true);
+  const [debugPanelVisible, setDebugPanelVisible] = useState(true);
   const [playerStats, setPlayerStats] = useState({
     speed: 5,
     projectileSpeed: 15,
@@ -306,12 +388,17 @@ const BallGame = () => {
   
   const ballSize = 30;
   const baseZombieSpeed = 2;
+  const baseRangedMinionSpeed = 1.5;
+  const enemyProjectileSpeed = 3.25; // 65% of 5 (reduced from 5)
   const shootIntervalRef = useRef(null);
   const zombieSpawnIntervalRef = useRef(null);
+  const rangedMinionSpawnIntervalRef = useRef(null);
   const positionRef = useRef(position);
   const mousePosRef = useRef(mousePos);
   const projectilesRef = useRef(projectiles);
   const zombiesRef = useRef(zombies);
+  const rangedMinionsRef = useRef(rangedMinions);
+  const enemyProjectilesRef = useRef(enemyProjectiles);
   const arenaSizeRef = useRef(arenaSize);
   const lastUpdateRef = useRef(0);
   const FRAME_RATE = 1000 / 60; // 60 FPS
@@ -319,6 +406,28 @@ const BallGame = () => {
   const playerStatsRef = useRef(playerStats);
   const scoreRef = useRef(score);
   const roundRef = useRef(round);
+  const roundCompleteRef = useRef(roundComplete);
+  
+  // Enemy type configuration
+  const enemyTypes = {
+    zombie: {
+      speed: baseZombieSpeed,
+      size: 25,
+      shootsProjectiles: false,
+      scoreValue: 10,
+      coinValue: 1
+    },
+    rangedMinion: {
+      speed: baseRangedMinionSpeed,
+      size: 25,
+      shootsProjectiles: true,
+      projectileSpeed: enemyProjectileSpeed,
+      shootRange: 400, // Maximum distance to shoot from
+      shootInterval: 2000, // Time between shots in ms
+      scoreValue: 15,
+      coinValue: 2
+    }
+  };
 
   // Update refs when values change
   useEffect(() => {
@@ -336,6 +445,14 @@ const BallGame = () => {
   useEffect(() => {
     zombiesRef.current = zombies;
   }, [zombies]);
+  
+  useEffect(() => {
+    rangedMinionsRef.current = rangedMinions;
+  }, [rangedMinions]);
+  
+  useEffect(() => {
+    enemyProjectilesRef.current = enemyProjectiles;
+  }, [enemyProjectiles]);
 
   useEffect(() => {
     arenaSizeRef.current = arenaSize;
@@ -352,6 +469,35 @@ const BallGame = () => {
   useEffect(() => {
     roundRef.current = round;
   }, [round]);
+  
+  useEffect(() => {
+    roundCompleteRef.current = roundComplete;
+  }, [roundComplete]);
+  
+  // Create an enemy projectile directed at the player
+  const createEnemyProjectile = useCallback((enemyPosition) => {
+    const playerCenter = { 
+      x: positionRef.current.x + ballSize/2, 
+      y: positionRef.current.y + ballSize/2 
+    };
+    
+    // Calculate direction to player
+    const direction = calculateDirection(
+      { x: enemyPosition.x, y: enemyPosition.y },
+      playerCenter
+    );
+    
+    const newProjectile = {
+      id: Date.now() + Math.random(),
+      x: enemyPosition.x,
+      y: enemyPosition.y,
+      dx: direction.dx * enemyProjectileSpeed,
+      dy: direction.dy * enemyProjectileSpeed,
+      size: 10
+    };
+    
+    setEnemyProjectiles(prev => [...prev, newProjectile]);
+  }, []);
 
   const createProjectile = useCallback(() => {
     const currentPos = positionRef.current;
@@ -367,9 +513,10 @@ const BallGame = () => {
     setProjectiles(prev => [...prev, newProjectile]);
   }, []);
 
+  // Create a normal zombie
   const createZombie = useCallback(() => {
     const currentArenaSize = arenaSizeRef.current;
-    const zombieSize = 25;
+    const zombieSize = enemyTypes.zombie.size;
     
     const { x, y } = generateRandomEdgePosition(currentArenaSize, zombieSize);
     
@@ -377,10 +524,30 @@ const BallGame = () => {
       id: Date.now() + Math.random(),
       x,
       y,
-      size: zombieSize
+      size: zombieSize,
+      type: 'zombie'
     };
     
     setZombies(prev => [...prev, newZombie]);
+  }, []);
+  
+  // Create a ranged minion
+  const createRangedMinion = useCallback(() => {
+    const currentArenaSize = arenaSizeRef.current;
+    const minionSize = enemyTypes.rangedMinion.size;
+    
+    const { x, y } = generateRandomEdgePosition(currentArenaSize, minionSize);
+    
+    const newMinion = {
+      id: Date.now() + Math.random(),
+      x,
+      y,
+      size: minionSize,
+      type: 'rangedMinion',
+      lastShotTime: Date.now() - enemyTypes.rangedMinion.shootInterval // Make them shoot immediately
+    };
+    
+    setRangedMinions(prev => [...prev, newMinion]);
   }, []);
 
   const startGame = useCallback(() => {
@@ -389,8 +556,12 @@ const BallGame = () => {
     setCoins(0);
     setRound(1);
     setRoundComplete(false);
+    setRoundShopOpen(true);
     setZombies([]);
+    setRangedMinions([]);
     setProjectiles([]);
+    setEnemyProjectiles([]);
+    
     setPosition({ 
       x: arenaSize.width / 2 - ballSize / 2, 
       y: arenaSize.height / 2 - ballSize / 2 
@@ -407,13 +578,21 @@ const BallGame = () => {
     setGameState('pregame');
   }, []);
 
-  // Handle proceeding to the next round - MOVED UP to before it's used in the useEffect
+  // Handle proceeding to the next round
   const continueToNextRound = useCallback(() => {
     // Increment the round
     setRound(prevRound => prevRound + 1);
     setRoundComplete(false);
+    roundCompleteRef.current = false; // Update ref immediately
+    setRoundShopOpen(true); // Reset shop visibility for next round
+    
+    // Reset score to 0 for the new round
+    setScore(0);
+    
     setZombies([]);
+    setRangedMinions([]);
     setProjectiles([]);
+    setEnemyProjectiles([]);
     
     // Place player back in the center
     setPosition({ 
@@ -424,16 +603,37 @@ const BallGame = () => {
     // Ensure game state is 'playing' to trigger zombie spawning
     setGameState('playing');
     
-    // Give the player a short grace period before zombies start spawning
+    // Give the player a short grace period before enemies start spawning
     if (zombieSpawnIntervalRef.current) {
       clearInterval(zombieSpawnIntervalRef.current);
+      zombieSpawnIntervalRef.current = null;
+    }
+    
+    if (rangedMinionSpawnIntervalRef.current) {
+      clearInterval(rangedMinionSpawnIntervalRef.current);
+      rangedMinionSpawnIntervalRef.current = null;
     }
     
     // Start spawning zombies after a 2 second delay
     setTimeout(() => {
-      zombieSpawnIntervalRef.current = setInterval(createZombie, 1500);
+      if (!roundCompleteRef.current) {
+        zombieSpawnIntervalRef.current = setInterval(() => {
+          if (!roundCompleteRef.current) {
+            createZombie();
+          }
+        }, 1500);
+        
+        // Start spawning ranged minions at a slower rate after round 1
+        if (roundRef.current > 1) {
+          rangedMinionSpawnIntervalRef.current = setInterval(() => {
+            if (!roundCompleteRef.current) {
+              createRangedMinion();
+            }
+          }, 3000);
+        }
+      }
     }, 2000);
-  }, [arenaSize, createZombie]);
+  }, [arenaSize, createZombie, createRangedMinion]);
 
   useEffect(() => {
     const updateArenaSize = () => {
@@ -472,6 +672,8 @@ const BallGame = () => {
           setKeys(prev => ({ ...prev, [key]: true }));
         } else if (key === 'p') {
           setShopOpen(prev => !prev);
+        } else if (key === 'v') {
+          setDebugPanelVisible(prev => !prev);
         }
       }
     };
@@ -563,15 +765,33 @@ const BallGame = () => {
     if (gameState !== 'playing') return;
     
     // Start spawning zombies
-    zombieSpawnIntervalRef.current = setInterval(createZombie, 1500);
+    zombieSpawnIntervalRef.current = setInterval(() => {
+      if (!roundCompleteRef.current) {
+        createZombie();
+      }
+    }, 1500);
+    
+    // Start spawning ranged minions starting from round 2
+    if (round > 1) {
+      rangedMinionSpawnIntervalRef.current = setInterval(() => {
+        if (!roundCompleteRef.current) {
+          createRangedMinion();
+        }
+      }, 3000);
+    }
     
     return () => {
       if (zombieSpawnIntervalRef.current) {
         clearInterval(zombieSpawnIntervalRef.current);
         zombieSpawnIntervalRef.current = null;
       }
+      
+      if (rangedMinionSpawnIntervalRef.current) {
+        clearInterval(rangedMinionSpawnIntervalRef.current);
+        rangedMinionSpawnIntervalRef.current = null;
+      }
     };
-  }, [createZombie, gameState]);
+  }, [createZombie, createRangedMinion, gameState, round]);
 
   // Calculate zombie speed based on score (scales up to 300% at 1000 points)
   const calculateZombieSpeed = useCallback((currentScore) => {
@@ -585,6 +805,19 @@ const BallGame = () => {
     
     return baseZombieSpeed * multiplier;
   }, []);
+  
+  // Calculate ranged minion speed based on score (scales up to 250% at 1000 points)
+  const calculateRangedMinionSpeed = useCallback((currentScore) => {
+    if (currentScore <= 0) return baseRangedMinionSpeed;
+    
+    // Calculate the speed multiplier (1.0 to 2.5) based on score
+    // Score 0 = 1.0x speed, Score 1000 = 2.5x speed
+    const maxMultiplier = 2.5;
+    const scoreThreshold = 1000;
+    const multiplier = Math.min(1.0 + (currentScore / scoreThreshold) * 1.5, maxMultiplier);
+    
+    return baseRangedMinionSpeed * multiplier;
+  }, []);
 
   useEffect(() => {
     if (gameState !== 'playing') return;
@@ -592,13 +825,23 @@ const BallGame = () => {
     let animationFrameId;
     
     const updateProjectiles = (timestamp) => {
+      // Exit immediately if round is complete
+      if (roundCompleteRef.current) {
+        animationFrameId = requestAnimationFrame(updateProjectiles);
+        return;
+      }
+      
       if (timestamp - lastUpdateRef.current >= FRAME_RATE) {
         // Track zombies hit in this update cycle to prevent multiple hits on the same zombie
         const hitZombieIds = new Set();
+        const hitMinionIds = new Set();
+        const now = Date.now();
         
+        // Update player projectiles
         setProjectiles(prev => {
           const currentArenaSize = arenaSizeRef.current;
           const currentZombies = zombiesRef.current;
+          const currentMinions = rangedMinionsRef.current;
           
           return prev.filter(projectile => {
             // Calculate new position
@@ -629,8 +872,35 @@ const BallGame = () => {
                 
                 // Update zombie state and add points
                 setZombies(prevZombies => prevZombies.filter(z => z.id !== zombie.id));
-                setScore(prevScore => prevScore + 10);
-                setCoins(prevCoins => prevCoins + 1);
+                setScore(prevScore => prevScore + enemyTypes.zombie.scoreValue);
+                setCoins(prevCoins => prevCoins + enemyTypes.zombie.coinValue);
+                
+                return false;
+              }
+            }
+            
+            // Check for ranged minion collisions
+            for (let i = 0; i < currentMinions.length; i++) {
+              const minion = currentMinions[i];
+              
+              // Skip minions already hit in this frame
+              if (hitMinionIds.has(minion.id)) continue;
+              
+              if (checkCollision(
+                { ...newPosition, size: projectile.size || 15 },
+                minion
+              )) {
+                // Mark this minion as hit
+                hitMinionIds.add(minion.id);
+                
+                // Remove minion directly from the reference to avoid collision detection race conditions
+                const updatedMinions = rangedMinionsRef.current.filter(m => m.id !== minion.id);
+                rangedMinionsRef.current = updatedMinions;
+                
+                // Update minion state and add points
+                setRangedMinions(prevMinions => prevMinions.filter(m => m.id !== minion.id));
+                setScore(prevScore => prevScore + enemyTypes.rangedMinion.scoreValue);
+                setCoins(prevCoins => prevCoins + enemyTypes.rangedMinion.coinValue);
                 
                 return false;
               }
@@ -641,12 +911,51 @@ const BallGame = () => {
             projectile.y = newPosition.y;
             return true;
           }).filter(p => {
-            const age = Date.now() - p.id;
+            const age = now - p.id;
             return age < 5000; // Remove projectiles after 5 seconds
           });
         });
         
-        // Update zombies - remove hit zombies and move remaining ones
+        // Update enemy projectiles
+        setEnemyProjectiles(prev => {
+          const currentArenaSize = arenaSizeRef.current;
+          const playerCenter = { 
+            x: positionRef.current.x + ballSize/2, 
+            y: positionRef.current.y + ballSize/2 
+          };
+          
+          return prev.filter(projectile => {
+            // Calculate new position
+            const newPosition = calculateNewPosition(projectile, projectile);
+            
+            // Remove projectile if it hits a wall
+            if (!isWithinBounds(newPosition, currentArenaSize, projectile.size)) {
+              return false;
+            }
+            
+            // Check for player collision
+            if (checkCollision(
+              { ...newPosition, size: projectile.size },
+              { ...playerCenter, size: ballSize }
+            )) {
+              // Game over if player is hit by enemy projectile and round is not complete
+              if (!roundCompleteRef.current) {
+                setGameState('gameover');
+              }
+              return false;
+            }
+            
+            // Update position if no collision
+            projectile.x = newPosition.x;
+            projectile.y = newPosition.y;
+            return true;
+          }).filter(p => {
+            const age = now - p.id;
+            return age < 7000; // Remove enemy projectiles after 7 seconds
+          });
+        });
+        
+        // Update zombies movement without re-filtering
         setZombies(prev => {
           const currentPos = positionRef.current;
           const currentScore = scoreRef.current;
@@ -662,8 +971,10 @@ const BallGame = () => {
               { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2, size: ballSize },
               zombie
             )) {
-              // Game over if zombie touches player
-              setGameState('gameover');
+              // Game over if zombie touches player and round is not complete
+              if (!roundCompleteRef.current) {
+                setGameState('gameover');
+              }
               return prev;
             }
           }
@@ -686,6 +997,78 @@ const BallGame = () => {
           });
         });
         
+        // Update ranged minions
+        setRangedMinions(prev => {
+          const currentPos = positionRef.current;
+          const currentScore = scoreRef.current;
+          
+          // Calculate current minion speed based on score
+          const currentMinionSpeed = calculateRangedMinionSpeed(currentScore);
+          
+          // Check for player collision
+          for (let i = 0; i < prev.length; i++) {
+            const minion = prev[i];
+            
+            if (checkCollision(
+              { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2, size: ballSize },
+              minion
+            )) {
+              // Game over if minion touches player and round is not complete
+              if (!roundCompleteRef.current) {
+                setGameState('gameover');
+              }
+              return prev;
+            }
+          }
+          
+          return prev.map(minion => {
+            // Calculate direction to player
+            const playerCenter = { 
+              x: currentPos.x + ballSize/2, 
+              y: currentPos.y + ballSize/2 
+            };
+            
+            // Calculate distance to player
+            const distanceToPlayer = calculateDistance(
+              { x: minion.x, y: minion.y },
+              playerCenter
+            );
+            
+            // Check if minion should shoot
+            const shootInterval = enemyTypes.rangedMinion.shootInterval;
+            const shootRange = enemyTypes.rangedMinion.shootRange;
+            const timeSinceLastShot = now - (minion.lastShotTime || 0);
+            
+            if (distanceToPlayer <= shootRange && timeSinceLastShot >= shootInterval && !roundCompleteRef.current) {
+              createEnemyProjectile({ x: minion.x, y: minion.y });
+              minion.lastShotTime = now;
+            }
+            
+            // Ranged minions try to maintain distance from the player
+            let direction;
+            const idealDistance = shootRange * 0.8; // They'll try to stay at 80% of their shooting range
+            
+            if (distanceToPlayer < idealDistance - 50) {
+              // Too close, move away
+              direction = calculateDirection(playerCenter, minion);
+            } else if (distanceToPlayer > idealDistance + 50) {
+              // Too far, move closer
+              direction = calculateDirection(minion, playerCenter);
+            } else {
+              // Ideal range, stop moving or move sideways
+              return { ...minion, lastShotTime: minion.lastShotTime };
+            }
+            
+            // Move minion with dynamic speed
+            return {
+              ...minion,
+              x: minion.x + direction.dx * currentMinionSpeed,
+              y: minion.y + direction.dy * currentMinionSpeed,
+              lastShotTime: minion.lastShotTime // Preserve the last shot time
+            };
+          });
+        });
+        
         lastUpdateRef.current = timestamp;
       }
       animationFrameId = requestAnimationFrame(updateProjectiles);
@@ -693,7 +1076,7 @@ const BallGame = () => {
 
     animationFrameId = requestAnimationFrame(updateProjectiles);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [FRAME_RATE, gameState, calculateZombieSpeed]);
+  }, [FRAME_RATE, gameState, calculateZombieSpeed, calculateRangedMinionSpeed, createEnemyProjectile]);
 
   // Add a function to display the current difficulty level
   const getDifficultyText = useCallback(() => {
@@ -762,7 +1145,12 @@ const BallGame = () => {
   // Calculate target score for the current round
   const getRoundTargetScore = useCallback((roundNumber) => {
     // Round 1: 100 points, Round 2: 150 points, increasing by 50 each round
-    return 100 + (roundNumber - 1) * 50;
+    // But cap the increase at round 5 to prevent excessive requirements
+    const baseIncrease = 50;
+    const maxRound = 5;
+    const cappedRound = Math.min(roundNumber, maxRound);
+    
+    return 100 + (cappedRound - 1) * baseIncrease;
   }, []);
   
   // Get the round progress as a percentage
@@ -771,19 +1159,60 @@ const BallGame = () => {
     return Math.min((score / targetScore) * 100, 100);
   }, [score, round, getRoundTargetScore]);
 
+  // Calculate the direction from source to target
+  const calculateDirection = (source, target) => {
+    const dx = target.x - source.x;
+    const dy = target.y - source.y;
+    const magnitude = Math.sqrt(dx * dx + dy * dy);
+    
+    if (magnitude === 0) return { dx: 0, dy: 0 };
+    
+    return {
+      dx: dx / magnitude,
+      dy: dy / magnitude
+    };
+  };
+
+  // Calculate the distance between two points
+  const calculateDistance = (point1, point2) => {
+    const dx = point2.x - point1.x;
+    const dy = point2.y - point1.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+  
+  // Check if a position is within the bounds of the arena
+  const isWithinBounds = (position, arenaSize, size) => {
+    return (
+      position.x >= 0 &&
+      position.x + size <= arenaSize.width &&
+      position.y >= 0 &&
+      position.y + size <= arenaSize.height
+    );
+  };
+
   // Check if the round is complete based on score
   useEffect(() => {
     const targetScore = getRoundTargetScore(round);
     if (score >= targetScore && gameState === 'playing') {
       setRoundComplete(true);
-      // Immediately clear zombies and projectiles when round completes
+      roundCompleteRef.current = true; // Update ref immediately
+      
+      // Immediately clear enemies and projectiles when round completes
       setZombies([]);
       setProjectiles([]);
+      setRangedMinions([]); // Clear ranged minions too
+      setEnemyProjectiles([]); // Clear enemy projectiles
       
       // Clear any active zombie spawning
       if (zombieSpawnIntervalRef.current) {
         clearInterval(zombieSpawnIntervalRef.current);
         zombieSpawnIntervalRef.current = null;
+      }
+      
+      // Clear ranged minion spawning
+      if (rangedMinionSpawnIntervalRef.current) {
+        clearInterval(rangedMinionSpawnIntervalRef.current);
+        rangedMinionSpawnIntervalRef.current = null;
       }
       
       // Clear auto-shooting if active
@@ -817,6 +1246,22 @@ const BallGame = () => {
                 data-testid="zombie"
               />
             ))}
+            {rangedMinions.map(minion => (
+              <RangedMinion
+                key={minion.id}
+                $x={minion.x}
+                $y={minion.y}
+                data-testid="ranged-minion"
+              />
+            ))}
+            {enemyProjectiles.map(projectile => (
+              <EnemyProjectile
+                key={projectile.id}
+                $x={projectile.x}
+                $y={projectile.y}
+                data-testid="enemy-projectile"
+              />
+            ))}
             <ScoreDisplay>Score: {score}</ScoreDisplay>
             <CoinDisplay>
               <CoinIcon /> {coins}
@@ -835,6 +1280,21 @@ const BallGame = () => {
               <RoundProgressFill $progress={getRoundProgress()} />
             </RoundProgressBar>
             
+            {/* Debug Panel */}
+            {debugPanelVisible && (
+              <DebugPanel>
+                <DebugButton onClick={continueToNextRound}>
+                  Next Round
+                </DebugButton>
+                <DebugButton onClick={() => setCoins(prev => prev + 100)}>
+                  +100 Coins
+                </DebugButton>
+                <DebugButton onClick={() => setScore(prev => prev + 100)}>
+                  +100 Score
+                </DebugButton>
+              </DebugPanel>
+            )}
+            
             {roundComplete && (
               <RoundCompleteOverlay>
                 <RoundCompleteMessage>Round {round} Complete!</RoundCompleteMessage>
@@ -845,16 +1305,26 @@ const BallGame = () => {
                   Continue to Round {round + 1}
                 </RoundContinueButton>
                 
-                <RoundCompleteDetails style={{ marginTop: '20px' }}>
-                  Shop for Upgrades
-                </RoundCompleteDetails>
+                {roundShopOpen && (
+                  <>
+                    <RoundCompleteDetails style={{ marginTop: '20px' }}>
+                      Shop for Upgrades
+                    </RoundCompleteDetails>
+                    
+                    <Shop 
+                      coins={coins}
+                      onPurchase={handlePurchase}
+                      onClose={() => setRoundShopOpen(false)}
+                      shopItems={shopItems}
+                    />
+                  </>
+                )}
                 
-                <Shop 
-                  coins={coins}
-                  onPurchase={handlePurchase}
-                  onClose={() => {}}
-                  shopItems={shopItems}
-                />
+                {!roundShopOpen && (
+                  <RoundContinueButton onClick={() => setRoundShopOpen(true)}>
+                    Open Shop
+                  </RoundContinueButton>
+                )}
               </RoundCompleteOverlay>
             )}
             
