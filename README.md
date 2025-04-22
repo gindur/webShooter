@@ -56,6 +56,7 @@ A browser-based shooting game built with React and styled-components.
   - [ ] Weapons (different projectile types)
   - [ ] Stat increases (permanent upgrades)
   - [ ] Special items (passive effects)
+  - [ ] Augments with unqiue abilities on items 
 - [ ] Weapon variety:
   - [ ] Shotgun (spread shot)
   - [ ] Laser (piercing)
