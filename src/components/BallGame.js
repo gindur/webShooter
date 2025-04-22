@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import styled, { keyframes } from 'styled-components';
 import Shop from './Shop';
 import {
@@ -491,6 +491,23 @@ const BallGame = () => {
   const activePowerUpsRef = useRef(activePowerUps);
   const basePlayerStatsRef = useRef(basePlayerStats);
   
+  // Add optimization settings
+  const [optimizationSettings, setOptimizationSettings] = useState({
+    maxProjectiles: 100,      // Maximum allowed player projectiles
+    cullingDistance: 1500,    // Distance at which to remove projectiles
+    collisionGridSize: 200,   // Size of spatial grid cells for collision detection
+  });
+  
+  // Add projectile pool for reusing objects
+  const projectilePoolRef = useRef([]);
+  const MAX_POOL_SIZE = 200;
+  
+  // Create a collision grid for spatial partitioning
+  const collisionGridRef = useRef({});
+  
+  // Use deltaTime for smoother animations
+  const lastFrameTimeRef = useRef(0);
+
   // Enemy type configuration
   const enemyTypes = {
     zombie: {
@@ -614,19 +631,114 @@ const BallGame = () => {
     setEnemyProjectiles(prev => [...prev, newProjectile]);
   }, []);
 
+  // Optimization: Get projectile from pool or create new one
+  const getProjectileFromPool = useCallback(() => {
+    if (projectilePoolRef.current.length > 0) {
+      return projectilePoolRef.current.pop();
+    }
+    return { id: Date.now() + Math.random() };
+  }, []);
+  
+  // Optimization: Return projectile to pool
+  const returnProjectileToPool = useCallback((projectile) => {
+    if (projectilePoolRef.current.length < MAX_POOL_SIZE) {
+      projectilePoolRef.current.push({
+        id: projectile.id
+      });
+    }
+  }, []);
+  
+  // Optimization: Update collision grid
+  const updateCollisionGrid = useCallback(() => {
+    const grid = {};
+    const cellSize = optimizationSettings.collisionGridSize;
+    
+    // Add zombies to grid
+    zombiesRef.current.forEach(zombie => {
+      const cellX = Math.floor(zombie.x / cellSize);
+      const cellY = Math.floor(zombie.y / cellSize);
+      const cellKey = `${cellX},${cellY}`;
+      
+      if (!grid[cellKey]) {
+        grid[cellKey] = { zombies: [], minions: [] };
+      }
+      
+      grid[cellKey].zombies.push(zombie);
+    });
+    
+    // Add minions to grid
+    rangedMinionsRef.current.forEach(minion => {
+      const cellX = Math.floor(minion.x / cellSize);
+      const cellY = Math.floor(minion.y / cellSize);
+      const cellKey = `${cellX},${cellY}`;
+      
+      if (!grid[cellKey]) {
+        grid[cellKey] = { zombies: [], minions: [] };
+      }
+      
+      grid[cellKey].minions.push(minion);
+    });
+    
+    collisionGridRef.current = grid;
+  }, [optimizationSettings.collisionGridSize]);
+  
+  // Optimization: Check collision with grid
+  const getCollidingEntities = useCallback((position, radius) => {
+    const cellSize = optimizationSettings.collisionGridSize;
+    const cellX = Math.floor(position.x / cellSize);
+    const cellY = Math.floor(position.y / cellSize);
+    const result = { zombies: [], minions: [] };
+    
+    // Check neighboring cells (3x3 grid around position)
+    for (let x = cellX - 1; x <= cellX + 1; x++) {
+      for (let y = cellY - 1; y <= cellY + 1; y++) {
+        const cellKey = `${x},${y}`;
+        const cell = collisionGridRef.current[cellKey];
+        
+        if (cell) {
+          // Add zombies from this cell
+          cell.zombies.forEach(zombie => {
+            result.zombies.push(zombie);
+          });
+          
+          // Add minions from this cell
+          cell.minions.forEach(minion => {
+            result.minions.push(minion);
+          });
+        }
+      }
+    }
+    
+    return result;
+  }, [optimizationSettings.collisionGridSize]);
+
+  // Modify createProjectile to use the pool
   const createProjectile = useCallback(() => {
+    // Limit max projectiles
+    if (projectilesRef.current.length >= optimizationSettings.maxProjectiles) {
+      return;
+    }
+    
     const currentPos = positionRef.current;
     const currentMousePos = mousePosRef.current;
     const currentPlayerStats = playerStatsRef.current;
     
-    const newProjectile = createProjectileUtil(
-      { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2 },
-      currentMousePos,
-      currentPlayerStats.projectileSpeed
-    );
+    // Get projectile from pool or create new
+    const projectileBase = getProjectileFromPool();
     
-    setProjectiles(prev => [...prev, newProjectile]);
-  }, []);
+    const newProjectile = {
+      ...projectileBase,
+      ...createProjectileUtil(
+        { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2 },
+        currentMousePos,
+        currentPlayerStats.projectileSpeed
+      )
+    };
+    
+    // Update using ref first for immediate use in other functions
+    projectilesRef.current = [...projectilesRef.current, newProjectile];
+    setProjectiles(projectilesRef.current);
+  }, [getProjectileFromPool, optimizationSettings.maxProjectiles]);
 
   // Create a normal zombie
   const createZombie = useCallback(() => {
@@ -1083,100 +1195,143 @@ const BallGame = () => {
         return;
       }
       
+      // Calculate delta time for smoother animations
+      const deltaTime = timestamp - lastFrameTimeRef.current || 0;
+      lastFrameTimeRef.current = timestamp;
+      
+      // Normalize delta time to avoid huge jumps after tab switch, etc.
+      const normalizedDelta = Math.min(deltaTime, 100) / (1000 / 60);
+      
       if (timestamp - lastUpdateRef.current >= FRAME_RATE) {
+        // Update collision grid for optimized collision detection
+        updateCollisionGrid();
+        
         // Track zombies hit in this update cycle to prevent multiple hits on the same zombie
         const hitZombieIds = new Set();
         const hitMinionIds = new Set();
         const now = Date.now();
         
+        // Create an array to collect projectiles to remove
+        const projectilesToRemove = [];
+        const updatedProjectiles = [];
+        
         // Update player projectiles
-        setProjectiles(prev => {
-          const currentArenaSize = arenaSizeRef.current;
-          const currentZombies = zombiesRef.current;
-          const currentMinions = rangedMinionsRef.current;
+        for (let i = 0; i < projectilesRef.current.length; i++) {
+          const projectile = projectilesRef.current[i];
           
-          return prev.filter(projectile => {
-            // Calculate new position
-            const newPosition = calculateNewPosition(projectile, projectile);
+          // Calculate new position
+          const newPosition = calculateNewPosition(projectile, {
+            dx: projectile.dx * normalizedDelta,
+            dy: projectile.dy * normalizedDelta
+          });
+          
+          // Remove projectile if it hits a wall or goes too far
+          if (!isWithinBounds(newPosition, arenaSizeRef.current, projectile.size || 15) ||
+              calculateDistance(
+                { x: positionRef.current.x, y: positionRef.current.y },
+                newPosition
+              ) > optimizationSettings.cullingDistance) {
+            projectilesToRemove.push(projectile);
+            continue;
+          }
+          
+          // Get nearby entities for collision check
+          const nearbyEntities = getCollidingEntities(newPosition, projectile.size || 15);
+          let hitSomething = false;
+          
+          // Check for zombie collisions
+          for (let j = 0; j < nearbyEntities.zombies.length && !hitSomething; j++) {
+            const zombie = nearbyEntities.zombies[j];
             
-            // Remove projectile if it hits a wall
-            if (!isWithinBounds(newPosition, currentArenaSize, projectile.size || 15)) {
-              return false;
-            }
+            // Skip zombies already hit in this frame
+            if (hitZombieIds.has(zombie.id)) continue;
             
-            // Check for zombie collisions
-            for (let i = 0; i < currentZombies.length; i++) {
-              const zombie = currentZombies[i];
+            if (checkCollision(
+              { ...newPosition, size: projectile.size || 15 },
+              zombie
+            )) {
+              // Mark this zombie as hit
+              hitZombieIds.add(zombie.id);
               
-              // Skip zombies already hit in this frame
-              if (hitZombieIds.has(zombie.id)) continue;
+              // Remove zombie directly from the reference to avoid collision detection race conditions
+              zombiesRef.current = zombiesRef.current.filter(z => z.id !== zombie.id);
               
-              if (checkCollision(
-                { ...newPosition, size: projectile.size || 15 },
-                zombie
-              )) {
-                // Mark this zombie as hit
-                hitZombieIds.add(zombie.id);
-                
-                // Remove zombie directly from the reference to avoid collision detection race conditions
-                const updatedZombies = zombiesRef.current.filter(z => z.id !== zombie.id);
-                zombiesRef.current = updatedZombies;
-                
-                // Update zombie state and add points
-                setZombies(prevZombies => prevZombies.filter(z => z.id !== zombie.id));
-                setScore(prevScore => prevScore + enemyTypes.zombie.scoreValue);
-                setCoins(prevCoins => prevCoins + enemyTypes.zombie.coinValue);
-                
-                // Chance to spawn a power-up (20% by default)
-                if (Math.random() * 100 < dropChance) {
-                  createPowerUp({ x: zombie.x, y: zombie.y });
-                }
-                
-                return false;
+              // Update zombie state and add points
+              setZombies(prevZombies => prevZombies.filter(z => z.id !== zombie.id));
+              setScore(prevScore => prevScore + enemyTypes.zombie.scoreValue);
+              setCoins(prevCoins => prevCoins + enemyTypes.zombie.coinValue);
+              
+              // Chance to spawn a power-up (20% by default)
+              if (Math.random() * 100 < dropChance) {
+                createPowerUp({ x: zombie.x, y: zombie.y });
               }
+              
+              hitSomething = true;
+              projectilesToRemove.push(projectile);
+              break;
             }
+          }
+          
+          // If already hit something, skip further checks
+          if (hitSomething) continue;
+          
+          // Check for ranged minion collisions
+          for (let j = 0; j < nearbyEntities.minions.length && !hitSomething; j++) {
+            const minion = nearbyEntities.minions[j];
             
-            // Check for ranged minion collisions
-            for (let i = 0; i < currentMinions.length; i++) {
-              const minion = currentMinions[i];
+            // Skip minions already hit in this frame
+            if (hitMinionIds.has(minion.id)) continue;
+            
+            if (checkCollision(
+              { ...newPosition, size: projectile.size || 15 },
+              minion
+            )) {
+              // Mark this minion as hit
+              hitMinionIds.add(minion.id);
               
-              // Skip minions already hit in this frame
-              if (hitMinionIds.has(minion.id)) continue;
+              // Remove minion directly from the reference to avoid collision detection race conditions
+              rangedMinionsRef.current = rangedMinionsRef.current.filter(m => m.id !== minion.id);
               
-              if (checkCollision(
-                { ...newPosition, size: projectile.size || 15 },
-                minion
-              )) {
-                // Mark this minion as hit
-                hitMinionIds.add(minion.id);
-                
-                // Remove minion directly from the reference to avoid collision detection race conditions
-                const updatedMinions = rangedMinionsRef.current.filter(m => m.id !== minion.id);
-                rangedMinionsRef.current = updatedMinions;
-                
-                // Update minion state and add points
-                setRangedMinions(prevMinions => prevMinions.filter(m => m.id !== minion.id));
-                setScore(prevScore => prevScore + enemyTypes.rangedMinion.scoreValue);
-                setCoins(prevCoins => prevCoins + enemyTypes.rangedMinion.coinValue);
-                
-                // Chance to spawn a power-up (20% by default)
-                if (Math.random() * 100 < dropChance) {
-                  createPowerUp({ x: minion.x, y: minion.y });
-                }
-                
-                return false;
+              // Update minion state and add points
+              setRangedMinions(prevMinions => prevMinions.filter(m => m.id !== minion.id));
+              setScore(prevScore => prevScore + enemyTypes.rangedMinion.scoreValue);
+              setCoins(prevCoins => prevCoins + enemyTypes.rangedMinion.coinValue);
+              
+              // Chance to spawn a power-up (20% by default)
+              if (Math.random() * 100 < dropChance) {
+                createPowerUp({ x: minion.x, y: minion.y });
               }
+              
+              hitSomething = true;
+              projectilesToRemove.push(projectile);
+              break;
             }
-            
-            // Update position if no collision
+          }
+          
+          // Update position if no collision
+          if (!hitSomething) {
             projectile.x = newPosition.x;
             projectile.y = newPosition.y;
-            return true;
-          }).filter(p => {
-            const age = now - p.id;
-            return age < 5000; // Remove projectiles after 5 seconds
-          });
+            updatedProjectiles.push(projectile);
+          }
+        }
+        
+        // Return removed projectiles to the pool
+        projectilesToRemove.forEach(returnProjectileToPool);
+        
+        // Filter out old projectiles based on age
+        const finalProjectiles = updatedProjectiles.filter(p => {
+          const age = now - p.id;
+          const shouldKeep = age < 5000; // Remove projectiles after 5 seconds
+          if (!shouldKeep) {
+            returnProjectileToPool(p);
+          }
+          return shouldKeep;
         });
+        
+        // Update the ref and state with the new projectiles
+        projectilesRef.current = finalProjectiles;
+        setProjectiles(finalProjectiles);
         
         // Check for power-up collisions with player
         setPowerUps(prev => {
@@ -1205,118 +1360,123 @@ const BallGame = () => {
           return remainingPowerUps;
         });
         
-        // Update enemy projectiles
-        setEnemyProjectiles(prev => {
-          const currentArenaSize = arenaSizeRef.current;
+        // Update enemy projectiles with optimized approach
+        const enemyProjectilesToRemove = [];
+        const updatedEnemyProjectiles = [];
+        
+        for (let i = 0; i < enemyProjectilesRef.current.length; i++) {
+          const projectile = enemyProjectilesRef.current[i];
+          
+          // Calculate new position with normalized delta
+          const newPosition = calculateNewPosition(projectile, {
+            dx: projectile.dx * normalizedDelta,
+            dy: projectile.dy * normalizedDelta
+          });
+          
+          // Remove projectile if it hits a wall
+          if (!isWithinBounds(newPosition, arenaSizeRef.current, projectile.size)) {
+            enemyProjectilesToRemove.push(projectile);
+            continue;
+          }
+          
+          // Check for player collision
           const playerCenter = { 
             x: positionRef.current.x + ballSize/2, 
             y: positionRef.current.y + ballSize/2 
           };
           
-          return prev.filter(projectile => {
-            // Calculate new position
-            const newPosition = calculateNewPosition(projectile, projectile);
-            
-            // Remove projectile if it hits a wall
-            if (!isWithinBounds(newPosition, currentArenaSize, projectile.size)) {
-              return false;
+          if (checkCollision(
+            { ...newPosition, size: projectile.size },
+            { ...playerCenter, size: ballSize }
+          )) {
+            // Game over if player is hit by enemy projectile and round is not complete
+            if (!roundCompleteRef.current) {
+              setGameState('gameover');
             }
-            
-            // Check for player collision
-            if (checkCollision(
-              { ...newPosition, size: projectile.size },
-              { ...playerCenter, size: ballSize }
-            )) {
-              // Game over if player is hit by enemy projectile and round is not complete
-              if (!roundCompleteRef.current) {
-                setGameState('gameover');
-              }
-              return false;
-            }
-            
-            // Update position if no collision
-            projectile.x = newPosition.x;
-            projectile.y = newPosition.y;
-            return true;
-          }).filter(p => {
-            const age = now - p.id;
-            return age < 7000; // Remove enemy projectiles after 7 seconds
-          });
-        });
-        
-        // Update zombies movement without re-filtering
-        setZombies(prev => {
-          const currentPos = positionRef.current;
-          const currentScore = scoreRef.current;
-          
-          // Calculate current zombie speed based on score
-          const currentZombieSpeed = calculateZombieSpeed(currentScore);
-          
-          // Check for player collision
-          for (let i = 0; i < prev.length; i++) {
-            const zombie = prev[i];
-            
-            if (checkCollision(
-              { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2, size: ballSize },
-              zombie
-            )) {
-              // Game over if zombie touches player and round is not complete
-              if (!roundCompleteRef.current) {
-                setGameState('gameover');
-              }
-              return prev;
-            }
+            enemyProjectilesToRemove.push(projectile);
+            continue;
           }
           
-          return prev.map(zombie => {
+          // Update position if no collision
+          projectile.x = newPosition.x;
+          projectile.y = newPosition.y;
+          updatedEnemyProjectiles.push(projectile);
+        }
+        
+        // Filter out old enemy projectiles based on age
+        const finalEnemyProjectiles = updatedEnemyProjectiles.filter(p => {
+          const age = now - p.id;
+          return age < 7000; // Remove enemy projectiles after 7 seconds
+        });
+        
+        // Update the refs and state
+        enemyProjectilesRef.current = finalEnemyProjectiles;
+        setEnemyProjectiles(finalEnemyProjectiles);
+        
+        // Update zombies movement with optimized approach
+        const currentPos = positionRef.current;
+        const currentScore = scoreRef.current;
+        const playerCenter = { 
+          x: currentPos.x + ballSize/2, 
+          y: currentPos.y + ballSize/2,
+          size: ballSize
+        };
+        
+        // Calculate current zombie speed based on score
+        const currentZombieSpeed = calculateZombieSpeed(currentScore);
+        
+        // Check for player collision with zombies
+        let playerHit = false;
+        for (let i = 0; i < zombiesRef.current.length && !playerHit; i++) {
+          const zombie = zombiesRef.current[i];
+          
+          if (checkCollision(playerCenter, zombie)) {
+            // Game over if zombie touches player and round is not complete
+            if (!roundCompleteRef.current) {
+              setGameState('gameover');
+              playerHit = true;
+            }
+          }
+        }
+        
+        // If player wasn't hit, update zombie positions
+        if (!playerHit) {
+          const updatedZombies = zombiesRef.current.map(zombie => {
             // Calculate direction to player
-            const playerCenter = { 
-              x: currentPos.x + ballSize/2, 
-              y: currentPos.y + ballSize/2 
-            };
-            
             const direction = calculateDirection(zombie, playerCenter);
             
-            // Move zombie towards player with dynamic speed
+            // Move zombie towards player with dynamic speed adjusted by deltaTime
             return {
               ...zombie,
-              x: zombie.x + direction.dx * currentZombieSpeed,
-              y: zombie.y + direction.dy * currentZombieSpeed
+              x: zombie.x + direction.dx * currentZombieSpeed * normalizedDelta,
+              y: zombie.y + direction.dy * currentZombieSpeed * normalizedDelta
             };
           });
-        });
+          
+          // Update both ref and state
+          zombiesRef.current = updatedZombies;
+          setZombies(updatedZombies);
+        }
         
-        // Update ranged minions
-        setRangedMinions(prev => {
-          const currentPos = positionRef.current;
-          const currentScore = scoreRef.current;
+        // Update ranged minions with optimized approach
+        const currentMinionSpeed = calculateRangedMinionSpeed(currentScore);
+        
+        // Check for player collision with minions
+        for (let i = 0; i < rangedMinionsRef.current.length && !playerHit; i++) {
+          const minion = rangedMinionsRef.current[i];
           
-          // Calculate current minion speed based on score
-          const currentMinionSpeed = calculateRangedMinionSpeed(currentScore);
-          
-          // Check for player collision
-          for (let i = 0; i < prev.length; i++) {
-            const minion = prev[i];
-            
-            if (checkCollision(
-              { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2, size: ballSize },
-              minion
-            )) {
-              // Game over if minion touches player and round is not complete
-              if (!roundCompleteRef.current) {
-                setGameState('gameover');
-              }
-              return prev;
+          if (checkCollision(playerCenter, minion)) {
+            // Game over if minion touches player and round is not complete
+            if (!roundCompleteRef.current) {
+              setGameState('gameover');
+              playerHit = true;
             }
           }
-          
-          return prev.map(minion => {
-            // Calculate direction to player
-            const playerCenter = { 
-              x: currentPos.x + ballSize/2, 
-              y: currentPos.y + ballSize/2 
-            };
-            
+        }
+        
+        // If player wasn't hit, update minion positions
+        if (!playerHit) {
+          const updatedMinions = rangedMinionsRef.current.map(minion => {
             // Calculate distance to player
             const distanceToPlayer = calculateDistance(
               { x: minion.x, y: minion.y },
@@ -1348,15 +1508,19 @@ const BallGame = () => {
               return { ...minion, lastShotTime: minion.lastShotTime };
             }
             
-            // Move minion with dynamic speed
+            // Move minion with dynamic speed adjusted by deltaTime
             return {
               ...minion,
-              x: minion.x + direction.dx * currentMinionSpeed,
-              y: minion.y + direction.dy * currentMinionSpeed,
+              x: minion.x + direction.dx * currentMinionSpeed * normalizedDelta,
+              y: minion.y + direction.dy * currentMinionSpeed * normalizedDelta,
               lastShotTime: minion.lastShotTime // Preserve the last shot time
             };
           });
-        });
+          
+          // Update both ref and state
+          rangedMinionsRef.current = updatedMinions;
+          setRangedMinions(updatedMinions);
+        }
         
         lastUpdateRef.current = timestamp;
       }
@@ -1365,7 +1529,7 @@ const BallGame = () => {
 
     animationFrameId = requestAnimationFrame(updateProjectiles);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [FRAME_RATE, gameState, calculateZombieSpeed, calculateRangedMinionSpeed, createEnemyProjectile, applyPowerUp, createPowerUp, dropChance]);
+  }, [FRAME_RATE, gameState, calculateZombieSpeed, calculateRangedMinionSpeed, createEnemyProjectile, applyPowerUp, createPowerUp, dropChance, getCollidingEntities, returnProjectileToPool, updateCollisionGrid, optimizationSettings]);
 
   // Add a function to display the current difficulty level
   const getDifficultyText = useCallback(() => {
@@ -1452,6 +1616,14 @@ const BallGame = () => {
       });
     }
   };
+
+  // Add optimizations controls to the debug panel
+  const updateOptimizationSetting = useCallback((setting, value) => {
+    setOptimizationSettings(prev => ({
+      ...prev,
+      [setting]: value
+    }));
+  }, []);
 
   return (
     <Container>
@@ -1578,6 +1750,32 @@ const BallGame = () => {
                   <div style={{ display: 'flex', alignItems: 'center' }}>
                     <span style={{ fontSize: '16px', marginRight: '6px' }}>💥</span>
                     <span>Damage: {playerStats.damage.toFixed(1)}</span>
+                  </div>
+                </div>
+                
+                {/* Performance Settings */}
+                <div style={{ marginTop: '15px', borderTop: '1px solid rgba(255,255,255,0.3)', paddingTop: '10px' }}>
+                  <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>📊 Performance</div>
+                  <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                    Max Projectiles: {optimizationSettings.maxProjectiles}
+                    <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
+                      <DebugButton onClick={() => updateOptimizationSetting('maxProjectiles', Math.max(10, optimizationSettings.maxProjectiles - 10))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('maxProjectiles', optimizationSettings.maxProjectiles + 10)}>+</DebugButton>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                    Culling Distance: {optimizationSettings.cullingDistance}
+                    <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
+                      <DebugButton onClick={() => updateOptimizationSetting('cullingDistance', Math.max(500, optimizationSettings.cullingDistance - 100))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('cullingDistance', optimizationSettings.cullingDistance + 100)}>+</DebugButton>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '12px' }}>
+                    Grid Size: {optimizationSettings.collisionGridSize}
+                    <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
+                      <DebugButton onClick={() => updateOptimizationSetting('collisionGridSize', Math.max(50, optimizationSettings.collisionGridSize - 50))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('collisionGridSize', optimizationSettings.collisionGridSize + 50)}>+</DebugButton>
+                    </div>
                   </div>
                 </div>
               </DebugPanel>
