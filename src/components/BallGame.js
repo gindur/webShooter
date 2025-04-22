@@ -7,7 +7,8 @@ import {
   createProjectile as createProjectileUtil,
   calculateNewPosition,
   isWithinBounds,
-  generateRandomEdgePosition
+  generateRandomEdgePosition,
+  calculateDistance
 } from '../utils/gameUtils';
 
 const breathe = keyframes`
@@ -25,6 +26,17 @@ const pulse = keyframes`
 const fadeIn = keyframes`
   from { opacity: 0; }
   to { opacity: 1; }
+`;
+
+const rotate = keyframes`
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+`;
+
+const float = keyframes`
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
 `;
 
 const Ball = styled.div.attrs(props => ({
@@ -355,6 +367,72 @@ const DebugButton = styled.button`
   }
 `;
 
+const PowerUp = styled.div.attrs(props => ({
+  style: {
+    left: `${props.$x}px`,
+    top: `${props.$y}px`,
+    backgroundColor: props.$color
+  },
+  'data-testid': 'power-up'
+}))`
+  width: 20px;
+  height: 20px;
+  position: absolute;
+  border-radius: 5px;
+  box-shadow: 0 0 15px ${props => props.$color};
+  animation: ${float} 2s ease-in-out infinite, ${rotate} 3s linear infinite;
+  z-index: 1;
+  
+  &::after {
+    content: '${props => props.$icon}';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 12px;
+    color: white;
+  }
+`;
+
+const ActivePowerUpIndicator = styled.div`
+  position: absolute;
+  top: 150px;
+  left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 3;
+`;
+
+const PowerUpItem = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background-color: rgba(0, 0, 0, 0.5);
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: white;
+`;
+
+const PowerUpIcon = styled.div`
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background-color: ${props => props.$color};
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+`;
+
+const PowerUpTimer = styled.div`
+  height: 3px;
+  background-color: white;
+  margin-top: 2px;
+  width: ${props => props.$timeLeft}%;
+  transition: width 0.1s linear;
+`;
+
 const BallGame = () => {
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [keys, setKeys] = useState({
@@ -379,12 +457,16 @@ const BallGame = () => {
   const [roundComplete, setRoundComplete] = useState(false);
   const [roundShopOpen, setRoundShopOpen] = useState(true);
   const [debugPanelVisible, setDebugPanelVisible] = useState(true);
-  const [playerStats, setPlayerStats] = useState({
+  const [basePlayerStats, setBasePlayerStats] = useState({
     speed: 5,
     projectileSpeed: 15,
     fireRate: 1000,
     damage: 1
   });
+  const [playerStats, setPlayerStats] = useState(basePlayerStats);
+  const [powerUps, setPowerUps] = useState([]);
+  const [activePowerUps, setActivePowerUps] = useState([]);
+  const [dropChance, setDropChance] = useState(20); // 20% default drop chance
   
   const ballSize = 30;
   const baseZombieSpeed = 2;
@@ -402,11 +484,12 @@ const BallGame = () => {
   const arenaSizeRef = useRef(arenaSize);
   const lastUpdateRef = useRef(0);
   const FRAME_RATE = 1000 / 60; // 60 FPS
-  const SHOT_COOLDOWN = 500; // Cooldown between shots in milliseconds
   const playerStatsRef = useRef(playerStats);
   const scoreRef = useRef(score);
   const roundRef = useRef(round);
   const roundCompleteRef = useRef(roundComplete);
+  const activePowerUpsRef = useRef(activePowerUps);
+  const basePlayerStatsRef = useRef(basePlayerStats);
   
   // Enemy type configuration
   const enemyTypes = {
@@ -426,6 +509,30 @@ const BallGame = () => {
       shootInterval: 2000, // Time between shots in ms
       scoreValue: 15,
       coinValue: 2
+    }
+  };
+
+  // Power-up type configuration
+  const powerUpTypes = {
+    rapidFire: {
+      name: 'Rapid Fire',
+      color: '#ff6b6b',
+      icon: '⚡',
+      duration: 4000, // 4 seconds
+      apply: (stats) => ({
+        ...stats,
+        fireRate: stats.fireRate * 0.1 // 60% faster
+      })
+    },
+    speedBoost: {
+      name: 'Speed Boost',
+      color: '#3498db',
+      icon: '🏃',
+      duration: 4000, // 4 seconds
+      apply: (stats) => ({
+        ...stats,
+        speed: stats.speed * 2 // 100% faster
+      })
     }
   };
 
@@ -463,6 +570,10 @@ const BallGame = () => {
   }, [playerStats]);
 
   useEffect(() => {
+    basePlayerStatsRef.current = basePlayerStats;
+  }, [basePlayerStats]);
+
+  useEffect(() => {
     scoreRef.current = score;
   }, [score]);
 
@@ -473,6 +584,10 @@ const BallGame = () => {
   useEffect(() => {
     roundCompleteRef.current = roundComplete;
   }, [roundComplete]);
+  
+  useEffect(() => {
+    activePowerUpsRef.current = activePowerUps;
+  }, [activePowerUps]);
   
   // Create an enemy projectile directed at the player
   const createEnemyProjectile = useCallback((enemyPosition) => {
@@ -562,16 +677,19 @@ const BallGame = () => {
     setProjectiles([]);
     setEnemyProjectiles([]);
     
-    setPosition({ 
-      x: arenaSize.width / 2 - ballSize / 2, 
-      y: arenaSize.height / 2 - ballSize / 2 
-    });
-    setPlayerStats({
+    const initialStats = {
       speed: 5,
       projectileSpeed: 15,
       fireRate: 1000,
       damage: 1
+    };
+    
+    setPosition({ 
+      x: arenaSize.width / 2 - ballSize / 2, 
+      y: arenaSize.height / 2 - ballSize / 2 
     });
+    setPlayerStats(initialStats);
+    setBasePlayerStats(initialStats);
   }, [arenaSize]);
 
   const resetGame = useCallback(() => {
@@ -693,7 +811,7 @@ const BallGame = () => {
       e.preventDefault();
       if (gameState === 'playing') {
         const now = Date.now();
-        if (now - lastShotTime >= SHOT_COOLDOWN) {
+        if (now - lastShotTime >= playerStatsRef.current.fireRate) {
           createProjectile();
           setLastShotTime(now);
         }
@@ -745,6 +863,11 @@ const BallGame = () => {
     if (gameState !== 'playing') return;
     
     if (isAutoShooting) {
+      // Clear any existing interval first
+      if (shootIntervalRef.current) {
+        clearInterval(shootIntervalRef.current);
+      }
+      // Use the current player stats for fire rate
       shootIntervalRef.current = setInterval(createProjectile, playerStatsRef.current.fireRate);
     } else {
       if (shootIntervalRef.current) {
@@ -759,7 +882,7 @@ const BallGame = () => {
         shootIntervalRef.current = null;
       }
     };
-  }, [isAutoShooting, createProjectile, gameState]);
+  }, [isAutoShooting, createProjectile, gameState, playerStats]);
 
   useEffect(() => {
     if (gameState !== 'playing') return;
@@ -819,6 +942,135 @@ const BallGame = () => {
     return baseRangedMinionSpeed * multiplier;
   }, []);
 
+  // Calculate target score for the current round
+  const getRoundTargetScore = useCallback((roundNumber) => {
+    // Round 1: 100 points, Round 2: 150 points, increasing by 50 each round
+    // But cap the increase at round 5 to prevent excessive requirements
+    const baseIncrease = 50;
+    const maxRound = 5;
+    const cappedRound = Math.min(roundNumber, maxRound);
+    
+    return 100 + (cappedRound - 1) * baseIncrease;
+  }, []);
+  
+  // Get the round progress as a percentage
+  const getRoundProgress = useCallback(() => {
+    const targetScore = getRoundTargetScore(round);
+    return Math.min((score / targetScore) * 100, 100);
+  }, [score, round, getRoundTargetScore]);
+
+  // Check if the round is complete based on score
+  useEffect(() => {
+    const targetScore = getRoundTargetScore(round);
+    if (score >= targetScore && gameState === 'playing') {
+      setRoundComplete(true);
+      roundCompleteRef.current = true; // Update ref immediately
+      
+      // Immediately clear enemies and projectiles when round completes
+      setZombies([]);
+      setProjectiles([]);
+      setRangedMinions([]); // Clear ranged minions too
+      setEnemyProjectiles([]); // Clear enemy projectiles
+      
+      // Clear any active zombie spawning
+      if (zombieSpawnIntervalRef.current) {
+        clearInterval(zombieSpawnIntervalRef.current);
+        zombieSpawnIntervalRef.current = null;
+      }
+      
+      // Clear ranged minion spawning
+      if (rangedMinionSpawnIntervalRef.current) {
+        clearInterval(rangedMinionSpawnIntervalRef.current);
+        rangedMinionSpawnIntervalRef.current = null;
+      }
+      
+      // Clear auto-shooting if active
+      if (shootIntervalRef.current) {
+        clearInterval(shootIntervalRef.current);
+        shootIntervalRef.current = null;
+      }
+      setIsAutoShooting(false);
+    }
+  }, [score, round, getRoundTargetScore, gameState]);
+
+  // Create a power-up at the given position
+  const createPowerUp = useCallback((position) => {
+    // Randomly select a power-up type
+    const types = Object.keys(powerUpTypes);
+    const randomType = types[Math.floor(Math.random() * types.length)];
+    
+    const powerUpConfig = powerUpTypes[randomType];
+    
+    const newPowerUp = {
+      id: Date.now() + Math.random(),
+      x: position.x,
+      y: position.y,
+      type: randomType,
+      ...powerUpConfig
+    };
+    
+    setPowerUps(prev => [...prev, newPowerUp]);
+  }, [powerUpTypes]);
+  
+  // Apply a power-up effect
+  const applyPowerUp = useCallback((powerUp) => {
+    // Create the active power-up
+    const activePowerUp = {
+      ...powerUp,
+      startTime: Date.now(),
+      endTime: Date.now() + powerUp.duration
+    };
+    
+    // Apply the effect
+    setPlayerStats(prevStats => powerUp.apply(prevStats));
+    
+    // Add to active power-ups
+    setActivePowerUps(prev => [...prev, activePowerUp]);
+    
+    // Restart auto-shooting if active to apply new fire rate immediately
+    if (shootIntervalRef.current) {
+      clearInterval(shootIntervalRef.current);
+      shootIntervalRef.current = setInterval(createProjectile, powerUp.apply(playerStatsRef.current).fireRate);
+    }
+    
+    // Schedule removal
+    setTimeout(() => {
+      setActivePowerUps(prev => {
+        // Find and remove the expired power-up
+        const updatedPowerUps = prev.filter(p => p.id !== activePowerUp.id);
+        
+        // If power-up type is no longer active, revert its effect
+        if (!updatedPowerUps.some(p => p.type === activePowerUp.type)) {
+          // Revert the effect by reapplying the base stats with permanent upgrades
+          let newStats = { ...basePlayerStatsRef.current };
+          
+          // Re-apply all active power-ups
+          updatedPowerUps.forEach(p => {
+            newStats = p.apply(newStats);
+          });
+          
+          setPlayerStats(newStats);
+          
+          // Restart auto-shooting with new fire rate if active
+          if (shootIntervalRef.current) {
+            clearInterval(shootIntervalRef.current);
+            shootIntervalRef.current = setInterval(createProjectile, newStats.fireRate);
+          }
+        }
+        
+        return updatedPowerUps;
+      });
+    }, powerUp.duration);
+    
+    // Remove the power-up from the game world
+    setPowerUps(prev => prev.filter(p => p.id !== powerUp.id));
+  }, [createProjectile]);
+  
+  // Update debug panel to include drop chance
+  const updateDropChance = useCallback((newChance) => {
+    setDropChance(Math.max(0, Math.min(100, newChance)));
+  }, []);
+
   useEffect(() => {
     if (gameState !== 'playing') return;
     
@@ -875,6 +1127,11 @@ const BallGame = () => {
                 setScore(prevScore => prevScore + enemyTypes.zombie.scoreValue);
                 setCoins(prevCoins => prevCoins + enemyTypes.zombie.coinValue);
                 
+                // Chance to spawn a power-up (20% by default)
+                if (Math.random() * 100 < dropChance) {
+                  createPowerUp({ x: zombie.x, y: zombie.y });
+                }
+                
                 return false;
               }
             }
@@ -902,6 +1159,11 @@ const BallGame = () => {
                 setScore(prevScore => prevScore + enemyTypes.rangedMinion.scoreValue);
                 setCoins(prevCoins => prevCoins + enemyTypes.rangedMinion.coinValue);
                 
+                // Chance to spawn a power-up (20% by default)
+                if (Math.random() * 100 < dropChance) {
+                  createPowerUp({ x: minion.x, y: minion.y });
+                }
+                
                 return false;
               }
             }
@@ -914,6 +1176,33 @@ const BallGame = () => {
             const age = now - p.id;
             return age < 5000; // Remove projectiles after 5 seconds
           });
+        });
+        
+        // Check for power-up collisions with player
+        setPowerUps(prev => {
+          const currentPos = positionRef.current;
+          const playerCenter = { 
+            x: currentPos.x + ballSize/2, 
+            y: currentPos.y + ballSize/2, 
+            size: ballSize
+          };
+          
+          const remainingPowerUps = [];
+          
+          prev.forEach(powerUp => {
+            if (checkCollision(
+              { x: powerUp.x, y: powerUp.y, size: 20 },
+              playerCenter
+            )) {
+              // Player collided with power-up, apply it
+              applyPowerUp(powerUp);
+            } else {
+              // No collision, keep the power-up
+              remainingPowerUps.push(powerUp);
+            }
+          });
+          
+          return remainingPowerUps;
         });
         
         // Update enemy projectiles
@@ -1076,7 +1365,7 @@ const BallGame = () => {
 
     animationFrameId = requestAnimationFrame(updateProjectiles);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [FRAME_RATE, gameState, calculateZombieSpeed, calculateRangedMinionSpeed, createEnemyProjectile]);
+  }, [FRAME_RATE, gameState, calculateZombieSpeed, calculateRangedMinionSpeed, createEnemyProjectile, applyPowerUp, createPowerUp, dropChance]);
 
   // Add a function to display the current difficulty level
   const getDifficultyText = useCallback(() => {
@@ -1138,91 +1427,31 @@ const BallGame = () => {
     
     if (item && coins >= item.price) {
       setCoins(prevCoins => prevCoins - item.price);
-      setPlayerStats(item.apply);
+      
+      // Update both current and base stats
+      const updatedStats = item.apply(basePlayerStatsRef.current);
+      setBasePlayerStats(updatedStats);
+      
+      // Apply the same update to current stats, preserving any active power-ups
+      setPlayerStats(prevStats => {
+        // Compute the ratio of current stats to base stats to preserve power-up effects
+        const ratios = {
+          speed: prevStats.speed / basePlayerStatsRef.current.speed,
+          projectileSpeed: prevStats.projectileSpeed / basePlayerStatsRef.current.projectileSpeed,
+          fireRate: prevStats.fireRate / basePlayerStatsRef.current.fireRate,
+          damage: prevStats.damage / basePlayerStatsRef.current.damage
+        };
+        
+        // Apply the same ratios to the new stats
+        return {
+          speed: updatedStats.speed * ratios.speed,
+          projectileSpeed: updatedStats.projectileSpeed * ratios.projectileSpeed,
+          fireRate: updatedStats.fireRate * ratios.fireRate,
+          damage: updatedStats.damage * ratios.damage
+        };
+      });
     }
   };
-
-  // Calculate target score for the current round
-  const getRoundTargetScore = useCallback((roundNumber) => {
-    // Round 1: 100 points, Round 2: 150 points, increasing by 50 each round
-    // But cap the increase at round 5 to prevent excessive requirements
-    const baseIncrease = 50;
-    const maxRound = 5;
-    const cappedRound = Math.min(roundNumber, maxRound);
-    
-    return 100 + (cappedRound - 1) * baseIncrease;
-  }, []);
-  
-  // Get the round progress as a percentage
-  const getRoundProgress = useCallback(() => {
-    const targetScore = getRoundTargetScore(round);
-    return Math.min((score / targetScore) * 100, 100);
-  }, [score, round, getRoundTargetScore]);
-
-  // Calculate the direction from source to target
-  const calculateDirection = (source, target) => {
-    const dx = target.x - source.x;
-    const dy = target.y - source.y;
-    const magnitude = Math.sqrt(dx * dx + dy * dy);
-    
-    if (magnitude === 0) return { dx: 0, dy: 0 };
-    
-    return {
-      dx: dx / magnitude,
-      dy: dy / magnitude
-    };
-  };
-
-  // Calculate the distance between two points
-  const calculateDistance = (point1, point2) => {
-    const dx = point2.x - point1.x;
-    const dy = point2.y - point1.y;
-    return Math.sqrt(dx * dx + dy * dy);
-  };
-  
-  // Check if a position is within the bounds of the arena
-  const isWithinBounds = (position, arenaSize, size) => {
-    return (
-      position.x >= 0 &&
-      position.x + size <= arenaSize.width &&
-      position.y >= 0 &&
-      position.y + size <= arenaSize.height
-    );
-  };
-
-  // Check if the round is complete based on score
-  useEffect(() => {
-    const targetScore = getRoundTargetScore(round);
-    if (score >= targetScore && gameState === 'playing') {
-      setRoundComplete(true);
-      roundCompleteRef.current = true; // Update ref immediately
-      
-      // Immediately clear enemies and projectiles when round completes
-      setZombies([]);
-      setProjectiles([]);
-      setRangedMinions([]); // Clear ranged minions too
-      setEnemyProjectiles([]); // Clear enemy projectiles
-      
-      // Clear any active zombie spawning
-      if (zombieSpawnIntervalRef.current) {
-        clearInterval(zombieSpawnIntervalRef.current);
-        zombieSpawnIntervalRef.current = null;
-      }
-      
-      // Clear ranged minion spawning
-      if (rangedMinionSpawnIntervalRef.current) {
-        clearInterval(rangedMinionSpawnIntervalRef.current);
-        rangedMinionSpawnIntervalRef.current = null;
-      }
-      
-      // Clear auto-shooting if active
-      if (shootIntervalRef.current) {
-        clearInterval(shootIntervalRef.current);
-        shootIntervalRef.current = null;
-      }
-      setIsAutoShooting(false);
-    }
-  }, [score, round, getRoundTargetScore, gameState]);
 
   return (
     <Container>
@@ -1262,6 +1491,37 @@ const BallGame = () => {
                 data-testid="enemy-projectile"
               />
             ))}
+            {powerUps.map(powerUp => (
+              <PowerUp
+                key={powerUp.id}
+                $x={powerUp.x}
+                $y={powerUp.y}
+                $color={powerUp.color}
+                $icon={powerUp.icon}
+                data-testid="power-up"
+              />
+            ))}
+            
+            {/* Active power-ups display */}
+            {activePowerUps.length > 0 && (
+              <ActivePowerUpIndicator>
+                {activePowerUps.map(powerUp => {
+                  const timeLeft = Math.max(0, powerUp.endTime - Date.now());
+                  const percentLeft = (timeLeft / powerUp.duration) * 100;
+                  
+                  return (
+                    <PowerUpItem key={powerUp.id}>
+                      <PowerUpIcon $color={powerUp.color}>{powerUp.icon}</PowerUpIcon>
+                      <div>
+                        {powerUp.name}
+                        <PowerUpTimer $timeLeft={percentLeft} />
+                      </div>
+                    </PowerUpItem>
+                  );
+                })}
+              </ActivePowerUpIndicator>
+            )}
+            
             <ScoreDisplay>Score: {score}</ScoreDisplay>
             <CoinDisplay>
               <CoinIcon /> {coins}
@@ -1280,7 +1540,7 @@ const BallGame = () => {
               <RoundProgressFill $progress={getRoundProgress()} />
             </RoundProgressBar>
             
-            {/* Debug Panel */}
+            {/* Debug Panel with drop chance */}
             {debugPanelVisible && (
               <DebugPanel>
                 <DebugButton onClick={continueToNextRound}>
@@ -1292,6 +1552,34 @@ const BallGame = () => {
                 <DebugButton onClick={() => setScore(prev => prev + 100)}>
                   +100 Score
                 </DebugButton>
+                <div style={{ marginTop: '10px', fontSize: '14px' }}>
+                  Drop Chance: {dropChance}%
+                </div>
+                <div style={{ display: 'flex', gap: '5px' }}>
+                  <DebugButton onClick={() => updateDropChance(dropChance - 5)}>-</DebugButton>
+                  <DebugButton onClick={() => updateDropChance(dropChance + 5)}>+</DebugButton>
+                </div>
+                
+                {/* Player Stats Display */}
+                <div style={{ marginTop: '15px', borderTop: '1px solid rgba(255,255,255,0.3)', paddingTop: '10px' }}>
+                  <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>⚙️ Player Stats</div>
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '16px', marginRight: '6px' }}>⚡</span>
+                    <span>Speed: {playerStats.speed.toFixed(1)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '16px', marginRight: '6px' }}>🔥</span>
+                    <span>Fire Rate: {playerStats.fireRate.toFixed(0)}ms</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '16px', marginRight: '6px' }}>🚀</span>
+                    <span>Projectile Speed: {playerStats.projectileSpeed.toFixed(1)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center' }}>
+                    <span style={{ fontSize: '16px', marginRight: '6px' }}>💥</span>
+                    <span>Damage: {playerStats.damage.toFixed(1)}</span>
+                  </div>
+                </div>
               </DebugPanel>
             )}
             
