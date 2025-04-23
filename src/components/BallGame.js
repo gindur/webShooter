@@ -494,9 +494,18 @@ const BallGame = () => {
   // Add optimization settings
   const [optimizationSettings, setOptimizationSettings] = useState({
     maxProjectiles: 100,      // Maximum allowed player projectiles
-    cullingDistance: 1500,    // Distance at which to remove projectiles
+    cullingDistance: 800,     // Distance at which to remove projectiles from player (reduced from 1500)
     collisionGridSize: 200,   // Size of spatial grid cells for collision detection
+    maxZombies: 40,           // Maximum zombies on screen at once
+    maxMinions: 15,           // Maximum ranged minions on screen at once
+    minEnemyDistance: 75,     // Minimum distance between spawned enemies
+    projectileRange: 600,     // Maximum distance a projectile can travel before being removed
+    enemyProjectileRange: 800 // Maximum distance an enemy projectile can travel
   });
+  
+  // Add spawning queues for enemies
+  const zombieQueueRef = useRef([]);
+  const minionQueueRef = useRef([]);
   
   // Add projectile pool for reusing objects
   const projectilePoolRef = useRef([]);
@@ -606,7 +615,7 @@ const BallGame = () => {
     activePowerUpsRef.current = activePowerUps;
   }, [activePowerUps]);
   
-  // Create an enemy projectile directed at the player
+  // Create an enemy projectile directed at the player with origin tracking
   const createEnemyProjectile = useCallback((enemyPosition) => {
     const playerCenter = { 
       x: positionRef.current.x + ballSize/2, 
@@ -625,7 +634,10 @@ const BallGame = () => {
       y: enemyPosition.y,
       dx: direction.dx * enemyProjectileSpeed,
       dy: direction.dy * enemyProjectileSpeed,
-      size: 10
+      size: 10,
+      originX: enemyPosition.x,  // Store origin for range calculation
+      originY: enemyPosition.y,
+      distanceTraveled: 0 // Track distance traveled
     };
     
     setEnemyProjectiles(prev => [...prev, newProjectile]);
@@ -712,7 +724,7 @@ const BallGame = () => {
     return result;
   }, [optimizationSettings.collisionGridSize]);
 
-  // Modify createProjectile to use the pool
+  // Modify createProjectile to use the pool and track origin
   const createProjectile = useCallback(() => {
     // Limit max projectiles
     if (projectilesRef.current.length >= optimizationSettings.maxProjectiles) {
@@ -726,13 +738,19 @@ const BallGame = () => {
     // Get projectile from pool or create new
     const projectileBase = getProjectileFromPool();
     
+    const originX = currentPos.x + ballSize/2;
+    const originY = currentPos.y + ballSize/2;
+    
     const newProjectile = {
       ...projectileBase,
       ...createProjectileUtil(
-        { x: currentPos.x + ballSize/2, y: currentPos.y + ballSize/2 },
+        { x: originX, y: originY },
         currentMousePos,
         currentPlayerStats.projectileSpeed
-      )
+      ),
+      originX,  // Store origin for range calculation
+      originY,
+      distanceTraveled: 0 // Track distance traveled
     };
     
     // Update using ref first for immediate use in other functions
@@ -740,42 +758,153 @@ const BallGame = () => {
     setProjectiles(projectilesRef.current);
   }, [getProjectileFromPool, optimizationSettings.maxProjectiles]);
 
-  // Create a normal zombie
+  // Create a zombie with spawn distancing
   const createZombie = useCallback(() => {
+    // Don't spawn if we're at the limit
+    if (zombiesRef.current.length >= optimizationSettings.maxZombies) {
+      // Add to spawn queue instead
+      zombieQueueRef.current.push({
+        timestamp: Date.now(),
+        attemptCount: 0
+      });
+      return;
+    }
+    
     const currentArenaSize = arenaSizeRef.current;
     const zombieSize = enemyTypes.zombie.size;
     
-    const { x, y } = generateRandomEdgePosition(currentArenaSize, zombieSize);
+    // Try to find a position that isn't too close to existing enemies
+    let position;
+    let attempts = 0;
+    const maxAttempts = 10; // Prevent infinite loops
+    let validPosition = false;
     
+    while (!validPosition && attempts < maxAttempts) {
+      position = generateRandomEdgePosition(currentArenaSize, zombieSize);
+      attempts++;
+      
+      // Check distance from existing zombies and minions
+      validPosition = true;
+      const minDistance = optimizationSettings.minEnemyDistance;
+      
+      // Check against zombies
+      for (let i = 0; i < zombiesRef.current.length; i++) {
+        const zombie = zombiesRef.current[i];
+        const distance = calculateDistance(
+          { x: position.x, y: position.y },
+          { x: zombie.x, y: zombie.y }
+        );
+        
+        if (distance < minDistance) {
+          validPosition = false;
+          break;
+        }
+      }
+      
+      // Check against minions if position still valid
+      if (validPosition) {
+        for (let i = 0; i < rangedMinionsRef.current.length; i++) {
+          const minion = rangedMinionsRef.current[i];
+          const distance = calculateDistance(
+            { x: position.x, y: position.y },
+            { x: minion.x, y: minion.y }
+          );
+          
+          if (distance < minDistance) {
+            validPosition = false;
+            break;
+          }
+        }
+      }
+    }
+    
+    // If we couldn't find a valid position after max attempts, just use the last one
     const newZombie = {
       id: Date.now() + Math.random(),
-      x,
-      y,
+      x: position.x,
+      y: position.y,
       size: zombieSize,
       type: 'zombie'
     };
     
-    setZombies(prev => [...prev, newZombie]);
-  }, []);
+    // Update ref first for immediate access
+    zombiesRef.current = [...zombiesRef.current, newZombie];
+    setZombies(zombiesRef.current);
+  }, [optimizationSettings.maxZombies, optimizationSettings.minEnemyDistance]);
   
-  // Create a ranged minion
+  // Create a ranged minion with spawn distancing
   const createRangedMinion = useCallback(() => {
+    // Don't spawn if we're at the limit
+    if (rangedMinionsRef.current.length >= optimizationSettings.maxMinions) {
+      // Add to spawn queue instead
+      minionQueueRef.current.push({
+        timestamp: Date.now(),
+        attemptCount: 0
+      });
+      return;
+    }
+    
     const currentArenaSize = arenaSizeRef.current;
     const minionSize = enemyTypes.rangedMinion.size;
     
-    const { x, y } = generateRandomEdgePosition(currentArenaSize, minionSize);
+    // Try to find a position that isn't too close to existing enemies
+    let position;
+    let attempts = 0;
+    const maxAttempts = 10; // Prevent infinite loops
+    let validPosition = false;
+    
+    while (!validPosition && attempts < maxAttempts) {
+      position = generateRandomEdgePosition(currentArenaSize, minionSize);
+      attempts++;
+      
+      // Check distance from existing zombies and minions
+      validPosition = true;
+      const minDistance = optimizationSettings.minEnemyDistance;
+      
+      // Check against zombies
+      for (let i = 0; i < zombiesRef.current.length; i++) {
+        const zombie = zombiesRef.current[i];
+        const distance = calculateDistance(
+          { x: position.x, y: position.y },
+          { x: zombie.x, y: zombie.y }
+        );
+        
+        if (distance < minDistance) {
+          validPosition = false;
+          break;
+        }
+      }
+      
+      // Check against minions if position still valid
+      if (validPosition) {
+        for (let i = 0; i < rangedMinionsRef.current.length; i++) {
+          const minion = rangedMinionsRef.current[i];
+          const distance = calculateDistance(
+            { x: position.x, y: position.y },
+            { x: minion.x, y: minion.y }
+          );
+          
+          if (distance < minDistance) {
+            validPosition = false;
+            break;
+          }
+        }
+      }
+    }
     
     const newMinion = {
       id: Date.now() + Math.random(),
-      x,
-      y,
+      x: position.x,
+      y: position.y,
       size: minionSize,
       type: 'rangedMinion',
       lastShotTime: Date.now() - enemyTypes.rangedMinion.shootInterval // Make them shoot immediately
     };
     
-    setRangedMinions(prev => [...prev, newMinion]);
-  }, []);
+    // Update ref first for immediate access
+    rangedMinionsRef.current = [...rangedMinionsRef.current, newMinion];
+    setRangedMinions(rangedMinionsRef.current);
+  }, [optimizationSettings.maxMinions, optimizationSettings.minEnemyDistance]);
 
   const startGame = useCallback(() => {
     setGameState('playing');
@@ -898,8 +1027,8 @@ const BallGame = () => {
       }
       
       if (gameState === 'playing' && !roundComplete) {
-        if (['w', 'a', 's', 'd'].includes(key)) {
-          setKeys(prev => ({ ...prev, [key]: true }));
+      if (['w', 'a', 's', 'd'].includes(key)) {
+        setKeys(prev => ({ ...prev, [key]: true }));
         } else if (key === 'p') {
           setShopOpen(prev => !prev);
         } else if (key === 'v') {
@@ -928,14 +1057,14 @@ const BallGame = () => {
           setLastShotTime(now);
         }
         
-        setIsAutoShooting(prev => {
-          const newState = !prev;
-          if (newState) {
-            createProjectile();
+      setIsAutoShooting(prev => {
+        const newState = !prev;
+        if (newState) {
+          createProjectile();
             setLastShotTime(Date.now());
-          }
-          return newState;
-        });
+        }
+        return newState;
+      });
       }
     };
 
@@ -1206,6 +1335,19 @@ const BallGame = () => {
         // Update collision grid for optimized collision detection
         updateCollisionGrid();
         
+        // Process spawn queues if we have space
+        if (zombiesRef.current.length < optimizationSettings.maxZombies && zombieQueueRef.current.length > 0) {
+          // Spawn oldest queued zombie
+          const queued = zombieQueueRef.current.shift();
+          createZombie();
+        }
+        
+        if (rangedMinionsRef.current.length < optimizationSettings.maxMinions && minionQueueRef.current.length > 0) {
+          // Spawn oldest queued minion
+          const queued = minionQueueRef.current.shift();
+          createRangedMinion();
+        }
+        
         // Track zombies hit in this update cycle to prevent multiple hits on the same zombie
         const hitZombieIds = new Set();
         const hitMinionIds = new Set();
@@ -1225,12 +1367,22 @@ const BallGame = () => {
             dy: projectile.dy * normalizedDelta
           });
           
-          // Remove projectile if it hits a wall or goes too far
+          // Calculate distance moved this frame
+          const distanceMoved = calculateDistance(
+            { x: projectile.x, y: projectile.y },
+            newPosition
+          );
+          
+          // Add to total distance traveled
+          const totalDistanceTraveled = (projectile.distanceTraveled || 0) + distanceMoved;
+          
+          // Remove projectile if it hits a wall, goes too far from player, or exceeds range
           if (!isWithinBounds(newPosition, arenaSizeRef.current, projectile.size || 15) ||
               calculateDistance(
                 { x: positionRef.current.x, y: positionRef.current.y },
                 newPosition
-              ) > optimizationSettings.cullingDistance) {
+              ) > optimizationSettings.cullingDistance ||
+              totalDistanceTraveled > optimizationSettings.projectileRange) {
             projectilesToRemove.push(projectile);
             continue;
           }
@@ -1306,12 +1458,13 @@ const BallGame = () => {
               projectilesToRemove.push(projectile);
               break;
             }
-          }
-          
-          // Update position if no collision
+            }
+            
+            // Update position if no collision
           if (!hitSomething) {
             projectile.x = newPosition.x;
             projectile.y = newPosition.y;
+            projectile.distanceTraveled = totalDistanceTraveled; // Update distance traveled
             updatedProjectiles.push(projectile);
           }
         }
@@ -1319,19 +1472,12 @@ const BallGame = () => {
         // Return removed projectiles to the pool
         projectilesToRemove.forEach(returnProjectileToPool);
         
-        // Filter out old projectiles based on age
-        const finalProjectiles = updatedProjectiles.filter(p => {
-          const age = now - p.id;
-          const shouldKeep = age < 5000; // Remove projectiles after 5 seconds
-          if (!shouldKeep) {
-            returnProjectileToPool(p);
-          }
-          return shouldKeep;
-        });
+        // Filter out old projectiles based on age (no longer needed with range check)
+        // Just use the updatedProjectiles directly
         
         // Update the ref and state with the new projectiles
-        projectilesRef.current = finalProjectiles;
-        setProjectiles(finalProjectiles);
+        projectilesRef.current = updatedProjectiles;
+        setProjectiles(updatedProjectiles);
         
         // Check for power-up collisions with player
         setPowerUps(prev => {
@@ -1373,8 +1519,18 @@ const BallGame = () => {
             dy: projectile.dy * normalizedDelta
           });
           
-          // Remove projectile if it hits a wall
-          if (!isWithinBounds(newPosition, arenaSizeRef.current, projectile.size)) {
+          // Calculate distance moved this frame
+          const distanceMoved = calculateDistance(
+            { x: projectile.x, y: projectile.y },
+            newPosition
+          );
+          
+          // Add to total distance traveled
+          const totalDistanceTraveled = (projectile.distanceTraveled || 0) + distanceMoved;
+          
+          // Remove projectile if it hits a wall or exceeds range
+          if (!isWithinBounds(newPosition, arenaSizeRef.current, projectile.size) ||
+              totalDistanceTraveled > optimizationSettings.enemyProjectileRange) {
             enemyProjectilesToRemove.push(projectile);
             continue;
           }
@@ -1400,18 +1556,16 @@ const BallGame = () => {
           // Update position if no collision
           projectile.x = newPosition.x;
           projectile.y = newPosition.y;
+          projectile.distanceTraveled = totalDistanceTraveled; // Update distance traveled
           updatedEnemyProjectiles.push(projectile);
         }
         
         // Filter out old enemy projectiles based on age
-        const finalEnemyProjectiles = updatedEnemyProjectiles.filter(p => {
-          const age = now - p.id;
-          return age < 7000; // Remove enemy projectiles after 7 seconds
-        });
+        // No need to filter by age anymore, range handles it
         
         // Update the refs and state
-        enemyProjectilesRef.current = finalEnemyProjectiles;
-        setEnemyProjectiles(finalEnemyProjectiles);
+        enemyProjectilesRef.current = updatedEnemyProjectiles;
+        setEnemyProjectiles(updatedEnemyProjectiles);
         
         // Update zombies movement with optimized approach
         const currentPos = positionRef.current;
@@ -1631,14 +1785,14 @@ const BallGame = () => {
         {gameState === 'playing' && (
           <>
             <Ball $x={position.x} $y={position.y} data-testid="game-ball" />
-            {projectiles.map(projectile => (
-              <Projectile
-                key={projectile.id}
-                $x={projectile.x}
-                $y={projectile.y}
+        {projectiles.map(projectile => (
+          <Projectile
+            key={projectile.id}
+            $x={projectile.x}
+            $y={projectile.y}
                 data-testid="projectile"
-              />
-            ))}
+          />
+        ))}
             {zombies.map(zombie => (
               <Zombie
                 key={zombie.id}
@@ -1764,18 +1918,42 @@ const BallGame = () => {
                     </div>
                   </div>
                   <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                    Projectile Range: {optimizationSettings.projectileRange}
+                    <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
+                      <DebugButton onClick={() => updateOptimizationSetting('projectileRange', Math.max(200, optimizationSettings.projectileRange - 100))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('projectileRange', optimizationSettings.projectileRange + 100)}>+</DebugButton>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '12px', marginBottom: '6px' }}>
                     Culling Distance: {optimizationSettings.cullingDistance}
                     <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
                       <DebugButton onClick={() => updateOptimizationSetting('cullingDistance', Math.max(500, optimizationSettings.cullingDistance - 100))}>-</DebugButton>
                       <DebugButton onClick={() => updateOptimizationSetting('cullingDistance', optimizationSettings.cullingDistance + 100)}>+</DebugButton>
                     </div>
                   </div>
-                  <div style={{ fontSize: '12px' }}>
-                    Grid Size: {optimizationSettings.collisionGridSize}
+                  <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                    Max Zombies: {optimizationSettings.maxZombies}
                     <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
-                      <DebugButton onClick={() => updateOptimizationSetting('collisionGridSize', Math.max(50, optimizationSettings.collisionGridSize - 50))}>-</DebugButton>
-                      <DebugButton onClick={() => updateOptimizationSetting('collisionGridSize', optimizationSettings.collisionGridSize + 50)}>+</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('maxZombies', Math.max(5, optimizationSettings.maxZombies - 5))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('maxZombies', optimizationSettings.maxZombies + 5)}>+</DebugButton>
                     </div>
+                  </div>
+                  <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                    Max Minions: {optimizationSettings.maxMinions}
+                    <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
+                      <DebugButton onClick={() => updateOptimizationSetting('maxMinions', Math.max(2, optimizationSettings.maxMinions - 2))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('maxMinions', optimizationSettings.maxMinions + 2)}>+</DebugButton>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                    Min Enemy Distance: {optimizationSettings.minEnemyDistance}
+                    <div style={{ display: 'flex', gap: '5px', marginTop: '2px' }}>
+                      <DebugButton onClick={() => updateOptimizationSetting('minEnemyDistance', Math.max(25, optimizationSettings.minEnemyDistance - 10))}>-</DebugButton>
+                      <DebugButton onClick={() => updateOptimizationSetting('minEnemyDistance', optimizationSettings.minEnemyDistance + 10)}>+</DebugButton>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '12px', marginTop: '6px' }}>
+                    Queue: Z:{zombieQueueRef.current.length} M:{minionQueueRef.current.length}
                   </div>
                 </div>
               </DebugPanel>
